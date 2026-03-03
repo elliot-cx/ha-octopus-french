@@ -70,11 +70,12 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
         electricity_supply_points = account_data.get("supply_points", {}).get(
             "electricity", []
         )
+        # Use 'prm' (externalIdentifier) instead of 'id' (UUID) for API calls
         electricity_meter_id = (
-            electricity_supply_points[0]["id"] if electricity_supply_points else None
+            electricity_supply_points[0].get("prm") if electricity_supply_points else None
         )
         gas_supply_points = account_data.get("supply_points", {}).get("gas", [])
-        gas_meter_id = gas_supply_points[0]["id"] if gas_supply_points else None
+        gas_meter_id = gas_supply_points[0].get("prm") if gas_supply_points else None
 
         now = dt_util.now()
         today_midnight = dt_util.start_of_local_day(now)

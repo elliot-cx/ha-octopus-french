@@ -270,7 +270,7 @@ async def async_setup_entry(
             continue
 
         prm_id = elec_meter.get("id")
-        tariff_type = _detect_tariff_type_for_meter(coordinator.data, prm_id)
+        tariff_type = _detect_tariff_type_for_meter(coordinator.data, elec_meter)
 
         for sensor_config in ELECTRICITY_SENSORS:
             sensor_key = sensor_config["key"]
@@ -293,6 +293,9 @@ async def async_setup_entry(
                         "tarif_hc",
                     ]
                 )
+                or (
+                    tariff_type == "UNKNOWN"
+                )  # Add all sensors if unknown to avoid missing data
             ):
                 entities.append(
                     OctopusElectricitySensor(coordinator, prm_id, sensor_config)
@@ -312,8 +315,12 @@ async def async_setup_entry(
                 if not index_type:
                     continue
 
-                if (index_tariff_type == "BASE" and index_type == "base") or (
-                    index_tariff_type == "HPHC" and index_type in ["hp", "hc"]
+                if (
+                    index_tariff_type == "BASE"
+                    and index_type == "base"
+                    or index_tariff_type == "HPHC"
+                    and index_type in ["hp", "hc"]
+                    or index_tariff_type is None
                 ):
                     entities.append(
                         OctopusElectricityIndexSensor(coordinator, prm_id, index_config)
@@ -328,28 +335,63 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-def _detect_tariff_type_for_meter(data: dict, prm_id: str) -> str:
-    """DÃ©tecte le type de tarif pour un compteur spÃ©cifique."""
+def _detect_tariff_type_for_meter(data: dict, meter_info: dict) -> str:
+    """DÃ©tecte le type de tarif pour un compteur spÃ©cifique en utilisant plusieurs sources."""
+    prm_id = meter_info.get("id")
+    external_prm = meter_info.get("prm")
+
+    # 1. Check index data (often more available than daily readings)
+    index_data = data.get("electricity", {}).get("index")
+    if index_data and index_data.get("tariff_type"):
+        return index_data.get("tariff_type")
+
+    # 2. Check agreements
+    for agreement in data.get("agreements", []):
+        if (
+            agreement.get("prm") == external_prm
+            or agreement.get("supply_point_id") == meter_info.get("supply_point_id")
+        ):
+            tariffs = agreement.get("tariffs", {})
+            consumption = tariffs.get("consumption", {})
+            if consumption.get("heures_pleines") and consumption.get("heures_creuses"):
+                return "HPHC"
+            if consumption.get("base"):
+                return "BASE"
+
+    # 3. Check meter data (offPeakLabel or providerCalendar)
+    off_peak = meter_info.get("offPeakLabel")
+    if off_peak and off_peak != "BASE":
+        return "HPHC"
+
+    calendar_id = meter_info.get("providerCalendar", {}).get("id", "")
+    if "HCHP" in calendar_id:
+        return "HPHC"
+    if "BASE" in calendar_id:
+        return "BASE"
+
+    # 4. Check readings (fallback)
     try:
         electricity_readings = data.get("electricity", {}).get("readings", [])
-        if not electricity_readings:
-            return "UNKNOWN"
+        if electricity_readings:
+            latest_reading = electricity_readings[-1]
+            statistics = latest_reading.get("metaData", {}).get("statistics", [])
+            labels = {stat.get("label", "") for stat in statistics}
 
-        latest_reading = electricity_readings[-1]
-        statistics = latest_reading.get("metaData", {}).get("statistics", [])
-        if not statistics:
-            return "UNKNOWN"
+            if any(
+                l in labels
+                for l in [
+                    "HEURES_PLEINES",
+                    "CONSO_HEURES_PLEINES",
+                    "HEURES_CREUSES",
+                    "CONSO_HEURES_CREUSES",
+                ]
+            ):
+                return "HPHC"
+            if "HEURES_BASE" in labels or "CONSO_BASE" in labels:
+                return "BASE"
+    except (KeyError, IndexError, TypeError):
+        pass
 
-        labels = {stat.get("label", "") for stat in statistics}
-
-        if "CONSO_BASE" in labels:
-            return "BASE"
-        if "CONSO_HEURES_PLEINES" in labels and "CONSO_HEURES_CREUSES" in labels:
-            return "HPHC"
-
-    except (KeyError, IndexError, TypeError) as e:
-        _LOGGER.error("Erreur dÃ©tection tarif %s: %s", prm_id, e)
-        return "UNKNOWN"
     return "UNKNOWN"
 
 
